@@ -91,9 +91,9 @@ export interface SandboxCreateOptions {
    */
   resource?: Record<string, string>;
   /**
-   * Sandbox timeout in seconds.
+   * Sandbox timeout in seconds. Set to `null` to require explicit cleanup.
    */
-  timeoutSeconds?: number;
+  timeoutSeconds?: number | null;
 
   /**
    * Skip readiness checks during create/connect.
@@ -254,10 +254,20 @@ export class Sandbox {
       }
     }
 
+    const rawTimeout = opts.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
+    const timeoutSeconds =
+      opts.timeoutSeconds === null
+        ? null
+        : Math.floor(rawTimeout);
+    if (timeoutSeconds !== null && !Number.isFinite(timeoutSeconds)) {
+      throw new Error(
+        `timeoutSeconds must be a finite number, got ${opts.timeoutSeconds}`
+      );
+    }
+
     const req: CreateSandboxRequest = {
       image: toImageSpec(opts.image),
       entrypoint: opts.entrypoint ?? DEFAULT_ENTRYPOINT,
-      timeout: Math.floor(opts.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS),
       resourceLimits: opts.resource ?? DEFAULT_RESOURCE_LIMITS,
       env: opts.env ?? {},
       metadata: opts.metadata ?? {},
@@ -270,6 +280,9 @@ export class Sandbox {
       volumes: opts.volumes,
       extensions: opts.extensions ?? {},
     };
+    if (timeoutSeconds !== null) {
+      req.timeout = timeoutSeconds;
+    }
 
     let sandboxId: SandboxId | undefined;
     try {
@@ -511,24 +524,43 @@ export class Sandbox {
     healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>;
   }): Promise<void> {
     const deadline = Date.now() + opts.readyTimeoutSeconds * 1000;
+    let attempt = 0;
+    let errorDetail = "Health check returned false continuously.";
+
+    const buildTimeoutMessage = () => {
+      const context = `domain=${this.connectionConfig.domain}, useServerProxy=${this.connectionConfig.useServerProxy}`;
+      let suggestion =
+        "If this sandbox runs in Docker bridge or remote-network mode, consider enabling useServerProxy=true.";
+      if (!this.connectionConfig.useServerProxy) {
+        suggestion += " You can also configure server-side [docker].host_ip for direct endpoint access.";
+      }
+      return `Sandbox health check timed out after ${opts.readyTimeoutSeconds}s (${attempt} attempts). ${errorDetail} Connection context: ${context}. ${suggestion}`;
+    };
 
     // Wait until execd becomes reachable and passes health check.
     while (true) {
       if (Date.now() > deadline) {
         throw new SandboxReadyTimeoutException({
-          message: `Sandbox not ready: timed out waiting for health check (timeoutSeconds=${opts.readyTimeoutSeconds})`,
+          message: buildTimeoutMessage(),
         });
       }
+      attempt++;
       try {
         if (opts.healthCheck) {
           const ok = await opts.healthCheck(this);
-          if (ok) return;
+          if (ok) {
+            return;
+          }
         } else {
           const ok = await this.health.ping();
-          if (ok) return;
+          if (ok) {
+            return;
+          }
         }
-      } catch {
-        // ignore and retry
+        errorDetail = "Health check returned false continuously.";
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        errorDetail = `Last health check error: ${message}`;
       }
       await sleep(opts.pollingIntervalMillis);
     }

@@ -26,7 +26,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -185,6 +185,14 @@ class ServerConfig(BaseModel):
         default=None,
         description="Bound public IP. When set, used as the host part when returning sandbox endpoints.",
     )
+    max_sandbox_timeout_seconds: Optional[int] = Field(
+        default=None,
+        ge=60,
+        description=(
+            "Maximum allowed sandbox TTL in seconds for requests that specify timeout. "
+            "Omit from config to disable the server-side upper bound."
+        ),
+    )
 
 
 class KubernetesRuntimeConfig(BaseModel):
@@ -216,6 +224,38 @@ class KubernetesRuntimeConfig(BaseModel):
             "[Beta] Watch timeout (seconds) before restarting the informer stream."
         ),
     )
+    read_qps: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "Maximum read requests per second to the Kubernetes API (get/list). "
+            "0 means unlimited (no rate limiting)."
+        ),
+    )
+    read_burst: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Burst size for the read rate limiter. "
+            "0 means use read_qps as burst (minimum 1)."
+        ),
+    )
+    write_qps: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "Maximum write requests per second to the Kubernetes API (create/delete/patch). "
+            "0 means unlimited (no rate limiting)."
+        ),
+    )
+    write_burst: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Burst size for the write rate limiter. "
+            "0 means use write_qps as burst (minimum 1)."
+        ),
+    )
     namespace: Optional[str] = Field(
         default=None,
         description="Namespace used for sandbox workloads.",
@@ -231,6 +271,36 @@ class KubernetesRuntimeConfig(BaseModel):
     batchsandbox_template_file: Optional[str] = Field(
         default=None,
         description="Path to BatchSandbox CR YAML template file. Used when workload_provider is 'batchsandbox'.",
+    )
+    sandbox_create_timeout_seconds: int = Field(
+        default=60,
+        ge=1,
+        description="Timeout in seconds to wait for a sandbox to become ready (IP assigned) after creation.",
+    )
+    sandbox_create_poll_interval_seconds: float = Field(
+        default=1.0,
+        gt=0,
+        description="Polling interval in seconds when waiting for a sandbox to become ready after creation.",
+    )
+    execd_init_resources: Optional["ExecdInitResources"] = Field(
+        default=None,
+        description=(
+            "Resource requests/limits for the execd init container. "
+            "If unset, no resource constraints are applied."
+        ),
+    )
+
+
+class ExecdInitResources(BaseModel):
+    """Resource requests and limits for the execd init container."""
+
+    limits: Optional[Dict[str, str]] = Field(
+        default=None,
+        description='Resource limits, e.g. {cpu = "100m", memory = "128Mi"}.',
+    )
+    requests: Optional[Dict[str, str]] = Field(
+        default=None,
+        description='Resource requests, e.g. {cpu = "50m", memory = "64Mi"}.',
     )
 
 
@@ -262,6 +332,14 @@ class StorageConfig(BaseModel):
             "Each entry must be an absolute path (e.g., '/data/opensandbox')."
         ),
     )
+    ossfs_mount_root: str = Field(
+        default="/mnt/ossfs",
+        description=(
+            "Host-side root directory where OSSFS mounts are resolved. "
+            "Resolved OSSFS host paths are built as "
+            "'ossfs_mount_root/<bucket>/<volume.subPath?>'."
+        ),
+    )
 
 
 class EgressConfig(BaseModel):
@@ -288,12 +366,69 @@ class RuntimeConfig(BaseModel):
     )
 
 
+class SecureRuntimeConfig(BaseModel):
+    """Secure container runtime configuration (gVisor, Kata, Firecracker)."""
+
+    type: Literal["", "gvisor", "kata", "firecracker"] = Field(
+        default="",
+        description=(
+            "Secure runtime type. Empty means no secure runtime. "
+            "gVisor uses runsc OCI runtime. "
+            "Kata uses kata-runtime (OCI) or kata-qemu (RuntimeClass). "
+            "Firecracker uses kata-fc (RuntimeClass, Kubernetes only)."
+        ),
+    )
+    docker_runtime: Optional[str] = Field(
+        default=None,
+        description=(
+            "OCI runtime name for Docker (e.g., 'runsc' for gVisor, 'kata-runtime' for Kata). "
+            "When specified, the Docker daemon will use this runtime instead of runc."
+        ),
+    )
+    k8s_runtime_class: Optional[str] = Field(
+        default=None,
+        description=(
+            "Kubernetes RuntimeClass name for secure containers. "
+            "Common values: 'gvisor', 'kata-qemu', 'kata-fc'. "
+            "When specified, pods will have runtimeClassName set to this value."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_secure_runtime(self) -> "SecureRuntimeConfig":
+        if self.type == "":
+            # No secure runtime configured
+            if self.docker_runtime is not None or self.k8s_runtime_class is not None:
+                raise ValueError(
+                    "docker_runtime and k8s_runtime_class must be omitted when secure_runtime.type is empty."
+                )
+            return self
+
+        if self.type == "firecracker":
+            # Firecracker is Kubernetes-only
+            if self.k8s_runtime_class is None:
+                raise ValueError(
+                    "secure_runtime.k8s_runtime_class is required when secure_runtime.type is 'firecracker'."
+                )
+            # Optional: also allow docker_runtime for consistency, but Firecracker won't use it
+
+        # For gVisor and Kata, at least one runtime must be specified
+        if self.type in ("gvisor", "kata"):
+            if self.docker_runtime is None and self.k8s_runtime_class is None:
+                raise ValueError(
+                    f"At least one of secure_runtime.docker_runtime or secure_runtime.k8s_runtime_class "
+                    f"must be specified when secure_runtime.type is '{self.type}'."
+                )
+
+        return self
+
+
 class DockerConfig(BaseModel):
     """Docker runtime specific settings."""
 
-    network_mode: Literal["host", "bridge"] = Field(
+    network_mode: str = Field(
         default="host",
-        description="Docker network mode for sandbox containers (host, bridge, ...).",
+        description="Docker network mode for sandbox containers (host, bridge, or a custom user-defined network name).",
     )
     api_timeout: Optional[int] = Field(
         default=None,
@@ -356,6 +491,10 @@ class AppConfig(BaseModel):
     docker: DockerConfig = Field(default_factory=DockerConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     egress: Optional[EgressConfig] = None
+    secure_runtime: Optional[SecureRuntimeConfig] = Field(
+        default=None,
+        description="Secure container runtime configuration (gVisor, Kata, Firecracker).",
+    )
 
     @model_validator(mode="after")
     def validate_runtime_blocks(self) -> "AppConfig":
@@ -366,6 +505,8 @@ class AppConfig(BaseModel):
                 raise ValueError("agent_sandbox block must be omitted when runtime.type = 'docker'.")
             if self.ingress is not None and self.ingress.mode != INGRESS_MODE_DIRECT:
                 raise ValueError("ingress.mode must be 'direct' when runtime.type = 'docker'.")
+            if self.secure_runtime is not None and self.secure_runtime.type == "firecracker":
+                raise ValueError( "secure_runtime.type 'firecracker' is only compatible with runtime.type='kubernetes'.")
         elif self.runtime.type == "kubernetes":
             if self.kubernetes is None:
                 self.kubernetes = KubernetesRuntimeConfig()
@@ -476,6 +617,7 @@ __all__ = [
     "StorageConfig",
     "KubernetesRuntimeConfig",
     "EgressConfig",
+    "SecureRuntimeConfig",
     "DEFAULT_CONFIG_PATH",
     "CONFIG_ENV_VAR",
     "get_config",

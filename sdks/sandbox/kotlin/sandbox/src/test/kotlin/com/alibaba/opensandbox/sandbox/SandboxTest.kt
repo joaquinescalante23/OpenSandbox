@@ -35,6 +35,7 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.verify
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -68,6 +69,14 @@ class SandboxTest {
 
     @BeforeEach
     fun setUp() {
+        every {
+            httpClientProvider.config
+        } returns
+            ConnectionConfig.builder()
+                .domain("localhost:8080")
+                .useServerProxy(false)
+                .build()
+
         sandbox =
             Sandbox(
                 id = sandboxId,
@@ -149,6 +158,20 @@ class SandboxTest {
     }
 
     @Test
+    fun `builder manualCleanup should clear timeout`() {
+        val builder =
+            Sandbox.builder()
+                .image("python:3.12")
+                .timeout(Duration.ofMinutes(5))
+                .manualCleanup()
+
+        val timeoutField = builder.javaClass.getDeclaredField("timeout")
+        timeoutField.isAccessible = true
+
+        assertNull(timeoutField.get(builder))
+    }
+
+    @Test
     fun `pause should delegate to sandboxService`() {
         every { sandboxService.pauseSandbox(sandboxId) } just Runs
 
@@ -207,5 +230,39 @@ class SandboxTest {
         assertThrows(SandboxReadyTimeoutException::class.java) {
             sandbox.checkReady(Duration.ofMillis(100), Duration.ofMillis(10))
         }
+    }
+
+    @Test
+    fun `checkReady timeout should include connection context and bridge hint`() {
+        every { healthService.ping(sandboxId) } throws RuntimeException("connect ECONNREFUSED")
+
+        val ex =
+            assertThrows(SandboxReadyTimeoutException::class.java) {
+                sandbox.checkReady(Duration.ofMillis(100), Duration.ofMillis(10))
+            }
+
+        assertTrue(ex.message!!.contains("Connection context: domain=localhost:8080, useServerProxy=false"))
+        assertTrue(ex.message!!.contains("useServerProxy=true"))
+        assertTrue(ex.message!!.contains("[docker].host_ip"))
+        assertTrue(ex.message!!.contains("Last error: connect ECONNREFUSED"))
+    }
+
+    @Test
+    fun `checkReady timeout should omit host_ip hint when server proxy is enabled`() {
+        val proxyEnabledConfig =
+            ConnectionConfig.builder()
+                .domain("localhost:8080")
+                .useServerProxy(true)
+                .build()
+        every { httpClientProvider.config } returns proxyEnabledConfig
+        every { healthService.ping(sandboxId) } returns false
+
+        val ex =
+            assertThrows(SandboxReadyTimeoutException::class.java) {
+                sandbox.checkReady(Duration.ofMillis(100), Duration.ofMillis(10))
+            }
+
+        assertTrue(ex.message!!.contains("useServerProxy=true"))
+        assertFalse(ex.message!!.contains("[docker].host_ip"))
     }
 }

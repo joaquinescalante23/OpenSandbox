@@ -12,4 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package controller
+package e2e_runtime
+
+const (
+	// SandboxImage is the image used for sandbox containers in tests
+	SandboxImage = "example.com/task-executor:v0.0.1"
+
+	// TaskExecutorImage is the name of the task-executor image
+	TaskExecutorImage = "example.com/task-executor:v0.0.1"
+)

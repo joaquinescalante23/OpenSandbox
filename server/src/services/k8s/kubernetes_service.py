@@ -21,7 +21,7 @@ using Kubernetes resources for sandbox lifecycle management.
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 from fastapi import HTTPException, status
@@ -30,6 +30,7 @@ from src.api.schema import (
     CreateSandboxRequest,
     CreateSandboxResponse,
     Endpoint,
+    ImageSpec,
     ListSandboxesRequest,
     ListSandboxesResponse,
     PaginationInfo,
@@ -41,15 +42,19 @@ from src.api.schema import (
 from src.config import AppConfig, get_config
 from src.services.constants import (
     SANDBOX_ID_LABEL,
+    SANDBOX_MANUAL_CLEANUP_LABEL,
     SandboxErrorCodes,
 )
 from src.services.helpers import matches_filter
 from src.services.sandbox_service import SandboxService
 from src.services.validators import (
+    calculate_expiration_or_raise,
     ensure_entrypoint,
     ensure_egress_configured,
     ensure_future_expiration,
     ensure_metadata_labels,
+    ensure_timeout_within_limit,
+    ensure_volumes_valid,
 )
 from src.services.k8s.client import K8sClient
 from src.services.k8s.provider_factory import create_workload_provider
@@ -88,7 +93,6 @@ class KubernetesSandboxService(SandboxService):
 
         self.namespace = self.app_config.kubernetes.namespace
         self.execd_image = runtime_config.execd_image
-        self.service_account = self.app_config.kubernetes.service_account
         
         # Initialize Kubernetes client
         try:
@@ -110,9 +114,7 @@ class KubernetesSandboxService(SandboxService):
             self.workload_provider = create_workload_provider(
                 provider_type=provider_type,
                 k8s_client=self.k8s_client,
-                k8s_config=self.app_config.kubernetes,
-                agent_sandbox_config=self.app_config.agent_sandbox,
-                ingress_config=self.ingress_config,
+                app_config=self.app_config,
             )
             logger.info(
                 f"Initialized workload provider: {self.workload_provider.__class__.__name__}"
@@ -187,18 +189,8 @@ class KubernetesSandboxService(SandboxService):
                     last_state = current_state
                     last_message = current_message
                 
-                # Check if Failed
-                if current_state == "Failed":
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail={
-                            "code": SandboxErrorCodes.K8S_POD_FAILED,
-                            "message": f"Pod failed: {current_message}",
-                        },
-                    )
-                
-                # Check if Running
-                if current_state == "Running":
+                # Check if Running or Allocated (IP assigned)
+                if current_state in ("Running", "Allocated"):
                     return workload
                 
             except HTTPException:
@@ -233,7 +225,28 @@ class KubernetesSandboxService(SandboxService):
         """
         # Common validation: egress.image must be configured
         ensure_egress_configured(request.network_policy, self.app_config.egress)
-    
+
+    def _ensure_image_auth_support(self, request: CreateSandboxRequest) -> None:
+        """
+        Validate image auth support for the current workload provider.
+
+        Raises HTTP 400 if the provider does not support per-request image auth.
+        """
+        if request.image.auth is None:
+            return
+        if self.workload_provider.supports_image_auth():
+            return
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": (
+                    "image.auth is not supported by the current workload provider. "
+                    "Use imagePullSecrets via Kubernetes ServiceAccount or sandbox template."
+                ),
+            },
+        )
+
     def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
         Create a new sandbox using Kubernetes Pod.
@@ -252,19 +265,28 @@ class KubernetesSandboxService(SandboxService):
         # Validate request
         ensure_entrypoint(request.entrypoint)
         ensure_metadata_labels(request.metadata)
+        ensure_timeout_within_limit(
+            request.timeout,
+            self.app_config.server.max_sandbox_timeout_seconds,
+        )
         self._ensure_network_policy_support(request)
+        self._ensure_image_auth_support(request)
         
         # Generate sandbox ID
         sandbox_id = self.generate_sandbox_id()
         
-        # Calculate expiration time
+        # Calculate expiration time (None = no TTL, manual cleanup only; same as Docker)
         created_at = datetime.now(timezone.utc)
-        expires_at = created_at + timedelta(seconds=request.timeout)
-        
+        expires_at = None
+        if request.timeout is not None:
+            expires_at = calculate_expiration_or_raise(created_at, request.timeout)
+
         # Build labels
         labels = {
             SANDBOX_ID_LABEL: sandbox_id,
         }
+        if expires_at is None:
+            labels[SANDBOX_MANUAL_CLEANUP_LABEL] = "true"
         
         # Add user metadata as labels
         if request.metadata:
@@ -281,6 +303,12 @@ class KubernetesSandboxService(SandboxService):
             if request.network_policy:
                 egress_image = self.app_config.egress.image if self.app_config.egress else None
             
+            # Validate volumes before creating workload
+            ensure_volumes_valid(
+                request.volumes,
+                self.app_config.storage.allowed_host_paths or None,
+            )
+            
             # Create workload
             workload_info = self.workload_provider.create_workload(
                 sandbox_id=sandbox_id,
@@ -295,6 +323,7 @@ class KubernetesSandboxService(SandboxService):
                 extensions=request.extensions,
                 network_policy=request.network_policy,
                 egress_image=egress_image,
+                volumes=request.volumes,
             )
             
             logger.info(
@@ -307,8 +336,8 @@ class KubernetesSandboxService(SandboxService):
             try:
                 workload = self._wait_for_sandbox_ready(
                     sandbox_id=sandbox_id,
-                    timeout_seconds=60,
-                    poll_interval_seconds=1.0,
+                    timeout_seconds=self.app_config.kubernetes.sandbox_create_timeout_seconds,
+                    poll_interval_seconds=self.app_config.kubernetes.sandbox_create_poll_interval_seconds,
                 )
                 
                 # Get final status
@@ -578,7 +607,17 @@ class KubernetesSandboxService(SandboxService):
                         "message": f"Sandbox '{sandbox_id}' not found",
                     },
                 )
-            
+
+            current_expiration = self.workload_provider.get_expiration(workload)
+            if current_expiration is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_EXPIRATION,
+                        "message": f"Sandbox {sandbox_id} does not have automatic expiration enabled.",
+                    },
+                )
+
             # Update BatchSandbox spec.expireTime field
             self.workload_provider.update_expiration(
                 sandbox_id=sandbox_id,
@@ -722,8 +761,6 @@ class KubernetesSandboxService(SandboxService):
                 image_uri = container.image or ""
                 entrypoint = container.command or []
         
-        # Create ImageSpec object
-        from src.api.schema import ImageSpec
         image_spec = ImageSpec(uri=image_uri) if image_uri else ImageSpec(uri="unknown")
         
         return Sandbox(

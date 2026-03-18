@@ -48,7 +48,7 @@ HOP_BY_HOP_HEADERS = {
     "proxy-authenticate",
     "proxy-authorization",
     "te",
-    "trailers",
+    "trailer",
     "transfer-encoding",
     "upgrade",
 }
@@ -73,7 +73,6 @@ sandbox_service = create_sandbox_service()
 @router.post(
     "/sandboxes",
     response_model=CreateSandboxResponse,
-    response_model_exclude_none=True,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         202: {"description": "Sandbox creation accepted for asynchronous provisioning"},
@@ -112,7 +111,6 @@ async def create_sandbox(
 @router.get(
     "/sandboxes",
     response_model=ListSandboxesResponse,
-    response_model_exclude_none=True,
     responses={
         200: {"description": "Paginated collection of sandboxes"},
         400: {"model": ErrorResponse, "description": "The request was invalid or malformed"},
@@ -176,7 +174,6 @@ async def list_sandboxes(
 @router.get(
     "/sandboxes/{sandbox_id}",
     response_model=Sandbox,
-    response_model_exclude_none=True,
     responses={
         200: {"description": "Sandbox current state and metadata"},
         401: {"model": ErrorResponse, "description": "Authentication credentials are missing or invalid"},
@@ -428,48 +425,65 @@ async def proxy_sandbox_endpoint_request(request: Request, sandbox_id: str, port
     and asynchronously proxies the request to it.
     """
 
-    endpoint = sandbox_service.get_endpoint(sandbox_id, port)
+    endpoint = sandbox_service.get_endpoint(sandbox_id, port, resolve_internal=True)
 
     target_host = endpoint.endpoint
     query_string = request.url.query
-    target_url = f"http://{target_host}/{full_path}"
-    if query_string:
-        target_url = f"{target_url}?{query_string}"
 
     client: httpx.AsyncClient = request.app.state.http_client
 
     try:
+        upgrade_header = request.headers.get("Upgrade", "")
+        if upgrade_header.lower() == "websocket":
+            raise HTTPException(status_code=400, detail="Websocket upgrade is not supported yet")
+
         # Filter headers
+        hop_by_hop = set(HOP_BY_HOP_HEADERS)
+        connection_header = request.headers.get("connection")
+        if connection_header:
+            hop_by_hop.update(
+                header.strip().lower()
+                for header in connection_header.split(",")
+                if header.strip()
+            )
         headers = {}
         for key, value in request.headers.items():
             key_lower = key.lower()
             if (
                 key_lower != "host"
-                and key_lower not in HOP_BY_HOP_HEADERS
+                and key_lower not in hop_by_hop
                 and key_lower not in SENSITIVE_HEADERS
             ):
                 headers[key] = value
 
         req = client.build_request(
             method=request.method,
-            url=target_url,
+            url=f"http://{target_host}/{full_path}",
+            params=query_string if query_string else None,
             headers=headers,
-            content=request.stream(),
+            content=request.stream() if request.method in ("POST", "PUT", "PATCH", "DELETE") else None,
         )
 
-        # TODO: support websocket protocol?
-        # since execd component does not have websocket handler currently, we just raise an error here
-        if request.method == "GET" and request.headers.get("Upgrade") == "websocket":
-            raise HTTPException(
-                status_code=400, detail="Websocket upgrade is not supported yet"
-            )
-
         resp = await client.send(req, stream=True)
+
+        hop_by_hop = set(HOP_BY_HOP_HEADERS)
+        connection_header = resp.headers.get("connection")
+        if connection_header:
+            hop_by_hop.update(
+                header.strip().lower()
+                for header in connection_header.split(",")
+                if header.strip()
+            )
+        response_headers = {
+            key: value
+            for key, value in resp.headers.items()
+            if key.lower() not in hop_by_hop
+        }
 
         return StreamingResponse(
             content=resp.aiter_bytes(),
             status_code=resp.status_code,
-            headers=resp.headers,
+            headers=response_headers,
         )
     except httpx.ConnectError as e:
         raise HTTPException(

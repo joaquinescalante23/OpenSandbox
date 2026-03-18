@@ -19,6 +19,9 @@
   <a href="https://badge.fury.io/js/@alibaba-group%2Fopensandbox">
     <img src="https://badge.fury.io/js/@alibaba-group%2Fopensandbox.svg" alt="npm version" />
   </a>
+  <a href="https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11">
+    <img src="https://img.shields.io/badge/DingTalk-Join-0089FF?logo=dingtalk&logoColor=white" alt="DingTalk" />
+  </a>
   <a href="https://github.com/alibaba/OpenSandbox/actions">
     <img src="https://github.com/alibaba/OpenSandbox/actions/workflows/real-e2e.yml/badge.svg?branch=main" alt="E2E Status" />
   </a>
@@ -38,6 +41,7 @@ OpenSandbox 是一个面向 AI 应用场景设计的「通用沙箱平台」，�
 - **沙箱运行时**：沙箱全生命周期管理，支持 Docker 和[自研高性能 Kubernetes 运行时](../kubernetes)，实现本地运行、企业级大规模分布式沙箱调度。
 - **沙箱环境**：内置 Command、Filesystem、Code Interpreter 实现。并提供 Coding Agent（Claude Code 等）、浏览器自动化（Chrome、Playwright）和桌面环境（VNC、VS Code）等示例。
 - **网络策略**：提供统一的 [Ingress Gateway](../components/ingress) 实现，并支持多种路由策略；提供单实例级别的沙箱[出口网络限制](../components/egress)。
+- **强隔离安全**：支持 gVisor、Kata Containers 和 Firecracker 微虚拟机等安全容器运行时，为沙箱工作负载与宿主机之间提供增强的安全隔离。详见 [安全容器运行时指南](secure-container.md)。
 
 ## 使用示例
 
@@ -95,7 +99,7 @@ from opensandbox.models import WriteEntry
 async def main() -> None:
     # 1. Create a sandbox
     sandbox = await Sandbox.create(
-        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
+        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2",
         entrypoint= ["/opt/opensandbox/code-interpreter.sh"],
         env={"PYTHON_VERSION": "3.11"},
         timeout=timedelta(minutes=10),
@@ -200,6 +204,7 @@ OpenSandbox 提供了丰富的示例来演示不同场景下的沙箱使用方�
 ## 文档
 
 - [docs/architecture.md](architecture.md) – 整体架构 & 设计理念
+- [oseps/README.md](../oseps/README.md) – OpenSandbox 增强提案 (OSEPs)
 - SDK
   - Sandbox 基础 SDK（[Java\Kotlin SDK](../sdks/sandbox/kotlin/README_zh.md)、[Python SDK](../sdks/sandbox/python/README_zh.md)、[JavaScript/TypeScript SDK](../sdks/sandbox/javascript/README_zh.md)、[C#/.NET SDK](../sdks/sandbox/csharp/README_zh.md)）- 包含沙箱生命周期、命令执行、文件操作
   - Code Interpreter SDK（[Java\Kotlin SDK](../sdks/code-interpreter/kotlin/README_zh.md) 、[Python SDK](../sdks/code-interpreter/python/README_zh.md)、[JavaScript/TypeScript SDK](../sdks/code-interpreter/javascript/README_zh.md)、[C#/.NET SDK](../sdks/code-interpreter/csharp/README_zh.md)）- 代码解释器
@@ -212,25 +217,27 @@ OpenSandbox 提供了丰富的示例来演示不同场景下的沙箱使用方�
 
 你可以在遵守许可条款的前提下，将 OpenSandbox 用于个人或商业项目。
 
-## 路线图
+## 路线图 [2026.03]
 
 ### SDK
 
-- [ ] **Go SDK** - Go 客户端 SDK，用于沙箱生命周期管理、命令执行和文件操作
+- **沙箱客户端连接池** - 客户端沙箱连接池管理，提供预配置的沙箱实例，以毫秒级速度获取沙箱环境。
+- **Go SDK** - Go 客户端 SDK，用于沙箱生命周期管理、命令执行和文件操作。
 
 ### Sandbox Runtime
 
-- [ ] **持久化存储** - 沙箱的持久化存储挂载，[Proposal 0003](../oseps/0003-volume-and-volumebinding-support.md)。
-- [ ] **Ingress 多网络策略的深度集成**：多 Kubernetes provision、多网络模式的 Ingress Gateway 集成。
-- [ ] **本地轻量级沙箱**：用于为运行在 PC 上的 AI 工具提供安全可靠的轻量级沙箱实现。
+- **持久化存储** - 沙箱的持久化存储挂载（参见 [Proposal 0003](../oseps/0003-volume-and-volumebinding-support.md)）。
+- **本地轻量级沙箱** - 为运行在 PC 上的 AI 工具提供轻量级沙箱。
+- **安全容器** - 为在容器内运行的 AI Agent 提供安全沙箱。
 
 ### Deployment
 
-- [ ] **Kubernetes Helm**：Kubernetes Helm 部署所有组件。
+- **部署指南** - 自托管 Kubernetes 集群的部署指南。
 
 ## 联系与讨论
 
 - Issue：通过 GitHub Issues 提交 bug、功能请求或设计讨论
+- 钉钉群：加入 [OpenSandbox 技术交流群](https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11)
 
 欢迎一起把 OpenSandbox 打造成 AI 场景下的通用沙箱基础设施。
 

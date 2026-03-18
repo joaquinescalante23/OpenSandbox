@@ -42,6 +42,12 @@ Pool 自定义资源维护一个预热的计算资源池，以实现快速沙箱
 - 池范围的容量限制，防止资源耗尽
 - 基于需求的自动扩展
 
+## 运行时 API 支持说明
+
+- Kubernetes 运行时当前**不支持** `pause` / `resume` 生命周期 API。
+- 对 Kubernetes 运行时调用这两个 API 会返回 `501 Not Implemented`。
+- OpenSandbox 的 pause/resume 语义是保留容器进程内存态后再恢复；当前 Kubernetes provider 主要覆盖 create/get/list/delete/renew 流程。
+
 
 ## 与 [kubernates-sigs/agent-sandbox](kubernates-sigs/agent-sandbox) 的关系
 
@@ -156,7 +162,7 @@ kind delete cluster
 
 ```sh
 # 将 <version> 替换为所需版本（例如：0.1.0）
-helm install opensandbox \
+helm install opensandbox-controller \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/<version>/opensandbox-controller-<version>.tgz \
   --namespace opensandbox-system \
   --create-namespace
@@ -164,7 +170,7 @@ helm install opensandbox \
 
 具体版本示例：
 ```sh
-helm install opensandbox \
+helm install opensandbox-controller \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
   --namespace opensandbox-system \
   --create-namespace
@@ -176,7 +182,7 @@ helm install opensandbox \
 wget https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/<version>/opensandbox-controller-<version>.tgz
 
 # 从本地文件安装
-helm install opensandbox ./opensandbox-controller-<version>.tgz \
+helm install opensandbox-controller ./opensandbox-controller-<version>.tgz \
   --namespace opensandbox-system \
   --create-namespace
 ```
@@ -187,7 +193,7 @@ helm install opensandbox ./opensandbox-controller-<version>.tgz \
 
 ```sh
 # 示例：自定义资源限制
-helm install opensandbox \
+helm install opensandbox-controller \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
   --namespace opensandbox-system \
   --create-namespace \
@@ -196,7 +202,7 @@ helm install opensandbox \
   --set controller.resources.limits.memory=512Mi
 
 # 示例：自定义日志级别
-helm install opensandbox \
+helm install opensandbox-controller \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
   --namespace opensandbox-system \
   --create-namespace \
@@ -221,7 +227,7 @@ controller:
 EOF
 
 # 使用自定义 values 安装
-helm install opensandbox \
+helm install opensandbox-controller \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
   --namespace opensandbox-system \
   --create-namespace \
@@ -243,7 +249,7 @@ helm install opensandbox \
 
 2. **使用 Helm 安装：**
    ```sh
-   helm install opensandbox ./charts/opensandbox-controller \
+   helm install opensandbox-controller ./charts/opensandbox-controller \
      --set controller.image.repository=<some-registry>/opensandbox-controller \
      --set controller.image.tag=<tag> \
      --namespace opensandbox-system \
@@ -265,7 +271,7 @@ kubectl logs -n opensandbox-system -l control-plane=controller-manager -f
 
 ```sh
 # 升级到新版本
-helm upgrade opensandbox \
+helm upgrade opensandbox-controller \
   https://github.com/alibaba/OpenSandbox/releases/download/helm/opensandbox-controller/<new-version>/opensandbox-controller-<new-version>.tgz \
   --namespace opensandbox-system
 ```
@@ -273,7 +279,7 @@ helm upgrade opensandbox \
 **卸载：**
 
 ```sh
-helm uninstall opensandbox -n opensandbox-system
+helm uninstall opensandbox-controller -n opensandbox-system
 ```
 
 有关更多配置选项和高级用法，请参阅 [Helm Chart README](charts/opensandbox-controller/README.md)。

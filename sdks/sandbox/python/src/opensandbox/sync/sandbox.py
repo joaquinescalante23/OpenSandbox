@@ -328,9 +328,30 @@ class SandboxSync:
 
             time.sleep(polling_interval.total_seconds())
 
-        error_detail = f"Last error: {last_exception}" if last_exception else "Health check returned false continuously"
+        error_detail = (
+            f"Last error: {last_exception}"
+            if last_exception
+            else "Health check returned false continuously"
+        )
+        connection_detail = (
+            f"ConnectionConfig(domain={self.connection_config.get_domain()}, "
+            f"use_server_proxy={self.connection_config.use_server_proxy})"
+        )
+        if self.connection_config.use_server_proxy:
+            hint = (
+                "Hint: server proxy mode is enabled. Check server-to-sandbox connectivity "
+                "and server API key/auth configuration."
+            )
+        else:
+            hint = (
+                "Hint: direct sandbox endpoint access is enabled. If the SDK cannot directly "
+                "reach sandbox network/ports, set ConnectionConfigSync(use_server_proxy=True). "
+                "For Docker bridge deployments where server runs in a container, also configure "
+                "server [docker].host_ip to a host-reachable address."
+            )
         final_message = (
-            f"Sandbox health check timed out after {timeout.total_seconds()}s ({attempt} attempts). {error_detail}"
+            f"Sandbox health check timed out after {timeout.total_seconds()}s "
+            f"({attempt} attempts). {error_detail}. {connection_detail}. {hint}"
         )
         logger.error(final_message)
         raise SandboxReadyTimeoutException(final_message)
@@ -340,7 +361,7 @@ class SandboxSync:
         cls,
         image: SandboxImageSpec | str,
         *,
-        timeout: timedelta = timedelta(minutes=10),
+        timeout: timedelta | None = timedelta(minutes=10),
         ready_timeout: timedelta = timedelta(seconds=30),
         env: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
@@ -359,7 +380,7 @@ class SandboxSync:
 
         Args:
             image: Container image specification including image reference and optional auth
-            timeout: Maximum sandbox lifetime
+            timeout: Maximum sandbox lifetime. Pass None to require explicit cleanup.
             ready_timeout: Maximum time to wait for sandbox to become ready
             env: Environment variables for the sandbox
             metadata: Custom metadata for the sandbox
@@ -390,10 +411,11 @@ class SandboxSync:
         if isinstance(image, str):
             image = SandboxImageSpec(image=image)
 
+        timeout_log = "manual-cleanup" if timeout is None else f"{timeout.total_seconds()}s"
         logger.info(
-            "Creating sandbox with image: %s (timeout: %ss)",
+            "Creating sandbox with image: %s (timeout: %s)",
             image.image,
-            timeout.total_seconds(),
+            timeout_log,
         )
         factory = AdapterFactorySync(config)
         sandbox_id: str | None = None

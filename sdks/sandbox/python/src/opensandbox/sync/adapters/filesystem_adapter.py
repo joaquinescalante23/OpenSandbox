@@ -22,6 +22,7 @@ import logging
 from collections.abc import Iterator
 from io import IOBase, TextIOBase
 from typing import TypedDict
+from urllib.parse import quote
 
 import httpx
 
@@ -31,7 +32,10 @@ from opensandbox.adapters.converter.exception_converter import (
 from opensandbox.adapters.converter.filesystem_model_converter import (
     FilesystemModelConverter,
 )
-from opensandbox.adapters.converter.response_handler import handle_api_error
+from opensandbox.adapters.converter.response_handler import (
+    extract_request_id,
+    handle_api_error,
+)
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
@@ -49,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 class _DownloadRequest(TypedDict):
     url: str
-    params: dict[str, str]
+    params: dict[str, str] | None
     headers: dict[str, str]
 
 
@@ -87,12 +91,12 @@ class FilesystemAdapterSync(FilesystemSync):
         return f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}{path}"
 
     def _build_download_request(self, path: str, range_header: str | None = None) -> _DownloadRequest:
-        url = self._get_execd_url(self.FILESYSTEM_DOWNLOAD_PATH)
-        params = {"path": path}
+        encoded_path = quote(path, safe="/")
+        url = f"{self._get_execd_url(self.FILESYSTEM_DOWNLOAD_PATH)}?path={encoded_path}"
         headers: dict[str, str] = {}
         if range_header:
             headers["Range"] = range_header
-        return {"url": url, "params": params, "headers": headers}
+        return {"url": url, "params": None, "headers": headers}
 
     def read_file(
         self,
@@ -108,11 +112,17 @@ class FilesystemAdapterSync(FilesystemSync):
         logger.debug("Reading file as bytes: %s", path)
         try:
             request_data = self._build_download_request(path, range_header)
-            response = self._httpx_client.get(
-                request_data["url"],
-                params=request_data["params"],
-                headers=request_data["headers"],
-            )
+            if request_data["params"] is None:
+                response = self._httpx_client.get(
+                    request_data["url"],
+                    headers=request_data["headers"],
+                )
+            else:
+                response = self._httpx_client.get(
+                    request_data["url"],
+                    headers=request_data["headers"],
+                    params=request_data["params"],
+                )
             response.raise_for_status()
             return response.content
         except Exception as e:
@@ -128,7 +138,15 @@ class FilesystemAdapterSync(FilesystemSync):
         params = request_data["params"]
         headers = request_data["headers"]
 
-        request = self._httpx_client.build_request("GET", url, params=params, headers=headers)
+        if params is None:
+            request = self._httpx_client.build_request("GET", url, headers=headers)
+        else:
+            request = self._httpx_client.build_request(
+                "GET",
+                url,
+                headers=headers,
+                params=params,
+            )
         response = self._httpx_client.send(request, stream=True)
 
         if response.status_code >= 300:
@@ -139,6 +157,7 @@ class FilesystemAdapterSync(FilesystemSync):
             raise SandboxApiException(
                 f"Failed to stream file {path}: {response.status_code}",
                 status_code=response.status_code,
+                request_id=extract_request_id(response.headers),
             )
 
         def _iter() -> Iterator[bytes]:
@@ -296,7 +315,10 @@ class FilesystemAdapterSync(FilesystemSync):
                 return []
             if isinstance(parsed, list) and all(isinstance(x, FileInfo) for x in parsed):
                 return FilesystemModelConverter.to_entry_info_list(parsed)
-            raise SandboxApiException(message="Search files failed: unexpected response type")
+            raise SandboxApiException(
+                message="Search files failed: unexpected response type",
+                request_id=extract_request_id(getattr(response_obj, "headers", None)),
+            )
         except Exception as e:
             logger.error("Failed to search files", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
